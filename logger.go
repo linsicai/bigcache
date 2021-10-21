@@ -6,6 +6,7 @@ import (
 )
 
 // Logger is invoked when `Config.Verbose=true`
+// 日志接口
 type Logger interface {
 	Printf(format string, v ...interface{})
 }
@@ -17,10 +18,12 @@ var _ Logger = &log.Logger{}
 
 // DefaultLogger returns a `Logger` implementation
 // backed by stdlib's log
+// 默认为标准输出
 func DefaultLogger() *log.Logger {
 	return log.New(os.Stdout, "", log.LstdFlags)
 }
 
+// 自定义日志接口
 func newLogger(custom Logger) Logger {
 	if custom != nil {
 		return custom

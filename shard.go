@@ -11,61 +11,97 @@ import (
 type onRemoveCallback func(wrappedEntry []byte, reason RemoveReason)
 
 // Metadata contains information of a specific entry
+// 元信息
 type Metadata struct {
 	RequestCount uint32
 }
 
+// 分片
 type cacheShard struct {
+    // hash
 	hashmap     map[uint64]uint32
+
+    // 实体数组
 	entries     queue.BytesQueue
+
+    // 读写锁
 	lock        sync.RWMutex
+
+    // 实体缓存
 	entryBuffer []byte
+	// 回调函数
 	onRemove    onRemoveCallback
 
+    // 打印详情
 	isVerbose    bool
+
+    // 开启统计
 	statsEnabled bool
+
+    // 日志函数
 	logger       Logger
+	// 时钟函数
 	clock        clock
+
+    // 超时时间
 	lifeWindow   uint64
 
+    // 统计信息
 	hashmapStats map[uint64]uint32
 	stats        Stats
 }
 
 func (s *cacheShard) getWithInfo(key string, hashedKey uint64) (entry []byte, resp Response, err error) {
+    // 当前时间
 	currentTime := uint64(s.clock.Epoch())
+
+    // 找hash 实体
 	s.lock.RLock()
 	wrappedEntry, err := s.getWrappedEntry(hashedKey)
 	if err != nil {
 		s.lock.RUnlock()
+		// 查找失败
 		return nil, resp, err
 	}
+
+    //  取key 值
 	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
 		s.lock.RUnlock()
+		// hash 冲突
 		s.collision()
 		if s.isVerbose {
+		    // 错误日志
 			s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, entryKey, hashedKey)
 		}
 		return nil, resp, ErrEntryNotFound
 	}
 
+    // 读取实体和数据时间
 	entry = readEntry(wrappedEntry)
 	oldestTimeStamp := readTimestampFromEntry(wrappedEntry)
 	s.lock.RUnlock()
+
+    // 统计收集
 	s.hit(hashedKey)
+
+    // 过期判断
 	if currentTime-oldestTimeStamp >= s.lifeWindow {
 		resp.EntryStatus = Expired
 	}
+
 	return entry, resp, nil
 }
 
 func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
+    // 找hash 实体
 	s.lock.RLock()
 	wrappedEntry, err := s.getWrappedEntry(hashedKey)
 	if err != nil {
 		s.lock.RUnlock()
 		return nil, err
 	}
+
+    // hash 冲突检测
 	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
 		s.lock.RUnlock()
 		s.collision()
@@ -74,21 +110,28 @@ func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
 		}
 		return nil, ErrEntryNotFound
 	}
+
+    // 抽取实体
 	entry := readEntry(wrappedEntry)
 	s.lock.RUnlock()
+
+    // 统计收集
 	s.hit(hashedKey)
 
 	return entry, nil
 }
 
 func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
+    // 查映射表
 	itemIndex := s.hashmap[hashedKey]
 
 	if itemIndex == 0 {
+	    // 无此hash
 		s.miss()
 		return nil, ErrEntryNotFound
 	}
 
+	// 取实体
 	wrappedEntry, err := s.entries.Get(int(itemIndex))
 	if err != nil {
 		s.miss()
@@ -99,12 +142,15 @@ func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
 }
 
 func (s *cacheShard) getValidWrapEntry(key string, hashedKey uint64) ([]byte, error) {
+    // 查询
 	wrappedEntry, err := s.getWrappedEntry(hashedKey)
 	if err != nil {
 		return nil, err
 	}
 
+	// 对比key
 	if !compareKeyFromEntry(wrappedEntry, key) {
+		// hash 冲突
 		s.collision()
 		if s.isVerbose {
 			s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, readKeyFromEntry(wrappedEntry), hashedKey)
@@ -118,10 +164,12 @@ func (s *cacheShard) getValidWrapEntry(key string, hashedKey uint64) ([]byte, er
 }
 
 func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
+	// 取当前时间
 	currentTimestamp := uint64(s.clock.Epoch())
 
 	s.lock.Lock()
 
+	// 找到老key，清理掉
 	if previousIndex := s.hashmap[hashedKey]; previousIndex != 0 {
 		if previousEntry, err := s.entries.Get(int(previousIndex)); err == nil {
 			resetKeyFromEntry(previousEntry)
@@ -130,18 +178,23 @@ func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
 		}
 	}
 
+	// 触发淘汰
 	if oldestEntry, err := s.entries.Peek(); err == nil {
 		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
 	}
 
+	// 打包
 	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &s.entryBuffer)
 
 	for {
+		// 写值
 		if index, err := s.entries.Push(w); err == nil {
 			s.hashmap[hashedKey] = uint32(index)
 			s.lock.Unlock()
 			return nil
 		}
+
+		// 写不成功，清理一下空间
 		if s.removeOldestEntry(NoSpace) != nil {
 			s.lock.Unlock()
 			return fmt.Errorf("entry is bigger than max shard size")
@@ -150,14 +203,18 @@ func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
 }
 
 func (s *cacheShard) addNewWithoutLock(key string, hashedKey uint64, entry []byte) error {
+	// 当前时间
 	currentTimestamp := uint64(s.clock.Epoch())
 
+	// 触发淘汰
 	if oldestEntry, err := s.entries.Peek(); err == nil {
 		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
 	}
 
+    // 打包
 	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &s.entryBuffer)
 
+	// 写值，如果不成功清理缓存
 	for {
 		if index, err := s.entries.Push(w); err == nil {
 			s.hashmap[hashedKey] = uint32(index)
@@ -170,16 +227,19 @@ func (s *cacheShard) addNewWithoutLock(key string, hashedKey uint64, entry []byt
 }
 
 func (s *cacheShard) setWrappedEntryWithoutLock(currentTimestamp uint64, w []byte, hashedKey uint64) error {
+	// 清理老key
 	if previousIndex := s.hashmap[hashedKey]; previousIndex != 0 {
 		if previousEntry, err := s.entries.Get(int(previousIndex)); err == nil {
 			resetKeyFromEntry(previousEntry)
 		}
 	}
 
+    // 触发老值
 	if oldestEntry, err := s.entries.Peek(); err == nil {
 		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
 	}
 
+    // 写新值
 	for {
 		if index, err := s.entries.Push(w); err == nil {
 			s.hashmap[hashedKey] = uint32(index)
@@ -193,22 +253,27 @@ func (s *cacheShard) setWrappedEntryWithoutLock(currentTimestamp uint64, w []byt
 
 func (s *cacheShard) append(key string, hashedKey uint64, entry []byte) error {
 	s.lock.Lock()
+	// 打实体
 	wrappedEntry, err := s.getValidWrapEntry(key, hashedKey)
 
 	if err == ErrEntryNotFound {
+	    // 找不到，新增一个
 		err = s.addNewWithoutLock(key, hashedKey, entry)
 		s.lock.Unlock()
 		return err
 	}
 	if err != nil {
+	    // 出错了
 		s.lock.Unlock()
 		return err
 	}
 
 	currentTimestamp := uint64(s.clock.Epoch())
 
+    // buffer 追加
 	w := appendToWrappedEntry(currentTimestamp, wrappedEntry, entry, &s.entryBuffer)
 
+    // 更新
 	err = s.setWrappedEntryWithoutLock(currentTimestamp, w, hashedKey)
 	s.lock.Unlock()
 
@@ -217,17 +282,21 @@ func (s *cacheShard) append(key string, hashedKey uint64, entry []byte) error {
 
 func (s *cacheShard) del(hashedKey uint64) error {
 	// Optimistic pre-check using only readlock
+	// 加锁
 	s.lock.RLock()
 	{
 		itemIndex := s.hashmap[hashedKey]
 
 		if itemIndex == 0 {
+		    // 没有这个项目
 			s.lock.RUnlock()
 			s.delmiss()
 			return ErrEntryNotFound
 		}
 
+		// 获取实体
 		if err := s.entries.CheckGet(int(itemIndex)); err != nil {
+			// 获取失败
 			s.lock.RUnlock()
 			s.delmiss()
 			return err
@@ -242,11 +311,13 @@ func (s *cacheShard) del(hashedKey uint64) error {
 		itemIndex := s.hashmap[hashedKey]
 
 		if itemIndex == 0 {
+		    // 二次校验
 			s.lock.Unlock()
 			s.delmiss()
 			return ErrEntryNotFound
 		}
 
+		// 获取实体
 		wrappedEntry, err := s.entries.Get(int(itemIndex))
 		if err != nil {
 			s.lock.Unlock()
@@ -254,11 +325,14 @@ func (s *cacheShard) del(hashedKey uint64) error {
 			return err
 		}
 
+		// 删key，触发淘汰
 		delete(s.hashmap, hashedKey)
 		s.onRemove(wrappedEntry, Deleted)
+		// 统计一下
 		if s.statsEnabled {
 			delete(s.hashmapStats, hashedKey)
 		}
+		// 重置key
 		resetKeyFromEntry(wrappedEntry)
 	}
 	s.lock.Unlock()
@@ -267,6 +341,7 @@ func (s *cacheShard) del(hashedKey uint64) error {
 	return nil
 }
 
+// 触发淘汰
 func (s *cacheShard) onEvict(oldestEntry []byte, currentTimestamp uint64, evict func(reason RemoveReason) error) bool {
 	oldestTimestamp := readTimestampFromEntry(oldestEntry)
 	if currentTimestamp-oldestTimestamp > s.lifeWindow {
@@ -280,8 +355,10 @@ func (s *cacheShard) cleanUp(currentTimestamp uint64) {
 	s.lock.Lock()
 	for {
 		if oldestEntry, err := s.entries.Peek(); err != nil {
+		    // 打老的失败
 			break
 		} else if evicted := s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry); !evicted {
+		    // 触发淘汰，再看是否继续
 			break
 		}
 	}
@@ -291,8 +368,11 @@ func (s *cacheShard) cleanUp(currentTimestamp uint64) {
 func (s *cacheShard) getEntry(hashedKey uint64) ([]byte, error) {
 	s.lock.RLock()
 
+	// 找实体
 	entry, err := s.getWrappedEntry(hashedKey)
+
 	// copy entry
+	// 复制实体
 	newEntry := make([]byte, len(entry))
 	copy(newEntry, entry)
 
@@ -301,6 +381,7 @@ func (s *cacheShard) getEntry(hashedKey uint64) ([]byte, error) {
 	return newEntry, err
 }
 
+// 复制hashkeys
 func (s *cacheShard) copyHashedKeys() (keys []uint64, next int) {
 	s.lock.RLock()
 	keys = make([]uint64, len(s.hashmap))
@@ -314,16 +395,22 @@ func (s *cacheShard) copyHashedKeys() (keys []uint64, next int) {
 	return keys, next
 }
 
+// 清理老实体
 func (s *cacheShard) removeOldestEntry(reason RemoveReason) error {
+    // 弹出最老的
 	oldest, err := s.entries.Pop()
 	if err == nil {
+	    // 获取其hash
 		hash := readHashFromEntry(oldest)
 		if hash == 0 {
 			// entry has been explicitly deleted with resetKeyFromEntry, ignore
 			return nil
 		}
+		// 删除hashkey
 		delete(s.hashmap, hash)
+		// 删除回调
 		s.onRemove(oldest, reason)
+		// 统计处理
 		if s.statsEnabled {
 			delete(s.hashmapStats, hash)
 		}
@@ -334,12 +421,15 @@ func (s *cacheShard) removeOldestEntry(reason RemoveReason) error {
 
 func (s *cacheShard) reset(config Config) {
 	s.lock.Lock()
+	// 重置hashkey
 	s.hashmap = make(map[uint64]uint32, config.initialShardSize())
+	// buffer
 	s.entryBuffer = make([]byte, config.MaxEntrySize+headersSizeInBytes)
 	s.entries.Reset()
 	s.lock.Unlock()
 }
 
+// 获取hash长度
 func (s *cacheShard) len() int {
 	s.lock.RLock()
 	res := len(s.hashmap)
@@ -347,6 +437,7 @@ func (s *cacheShard) len() int {
 	return res
 }
 
+// 容量
 func (s *cacheShard) capacity() int {
 	s.lock.RLock()
 	res := s.entries.Capacity()
@@ -354,6 +445,7 @@ func (s *cacheShard) capacity() int {
 	return res
 }
 
+// 获取统计信息
 func (s *cacheShard) getStats() Stats {
 	var stats = Stats{
 		Hits:       atomic.LoadInt64(&s.stats.Hits),
@@ -365,6 +457,7 @@ func (s *cacheShard) getStats() Stats {
 	return stats
 }
 
+// 获取hashkey 请求数
 func (s *cacheShard) getKeyMetadataWithLock(key uint64) Metadata {
 	s.lock.RLock()
 	c := s.hashmapStats[key]
@@ -380,9 +473,11 @@ func (s *cacheShard) getKeyMetadata(key uint64) Metadata {
 	}
 }
 
+// 统计命中数
 func (s *cacheShard) hit(key uint64) {
 	atomic.AddInt64(&s.stats.Hits, 1)
 	if s.statsEnabled {
+	    // key 的请求数
 		s.lock.Lock()
 		s.hashmapStats[key]++
 		s.lock.Unlock()
@@ -413,11 +508,14 @@ func (s *cacheShard) collision() {
 }
 
 func initNewShard(config Config, callback onRemoveCallback, clock clock) *cacheShard {
+	// 参数计算
 	bytesQueueInitialCapacity := config.initialShardSize() * config.MaxEntrySize
 	maximumShardSizeInBytes := config.maximumShardSizeInBytes()
 	if maximumShardSizeInBytes > 0 && bytesQueueInitialCapacity > maximumShardSizeInBytes {
 		bytesQueueInitialCapacity = maximumShardSizeInBytes
 	}
+
+	// 构造函数
 	return &cacheShard{
 		hashmap:      make(map[uint64]uint32, config.initialShardSize()),
 		hashmapStats: make(map[uint64]uint32, config.initialShardSize()),

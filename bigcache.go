@@ -6,6 +6,7 @@ import (
 )
 
 const (
+    // 每分片最小实体数
 	minimumEntriesInShard = 10 // Minimum number of entries in single shard
 )
 
@@ -13,31 +14,45 @@ const (
 // It keeps entries on heap but omits GC for them. To achieve that, operations take place on byte arrays,
 // therefore entries (de)serialization in front of the cache will be needed in most use cases.
 type BigCache struct {
+    // 分片
 	shards       []*cacheShard
+	// 超时时间
 	lifeWindow   uint64
+	// 时钟函数
 	clock        clock
+	// hash 函数
 	hash         Hasher
+	// 配置
 	config       Config
+	// 分片掩码
 	shardMask    uint64
+	// 最大分片数
 	maxShardSize uint32
+	// 关闭通道
 	close        chan struct{}
 }
 
 // Response will contain metadata about the entry for which GetWithInfo(key) was called
+// 回调结果
 type Response struct {
+    // 实体状态
 	EntryStatus RemoveReason
 }
 
 // RemoveReason is a value used to signal to the user why a particular key was removed in the OnRemove callback.
+// 删除原因
 type RemoveReason uint32
 
 const (
 	// Expired means the key is past its LifeWindow.
+	// 超时
 	Expired = RemoveReason(1)
 	// NoSpace means the key is the oldest and the cache size was at its maximum when Set was called, or the
 	// entry exceeded the maximum shard size.
+	// 空间不足
 	NoSpace = RemoveReason(2)
 	// Deleted means Delete was called and this key was removed as a result.
+	// 被删除
 	Deleted = RemoveReason(3)
 )
 
@@ -48,14 +63,17 @@ func NewBigCache(config Config) (*BigCache, error) {
 
 func newBigCache(config Config, clock clock) (*BigCache, error) {
 
+	// 校验分片数
 	if !isPowerOfTwo(config.Shards) {
 		return nil, fmt.Errorf("Shards number must be power of two")
 	}
 
+	// 初始化hash 函数
 	if config.Hasher == nil {
 		config.Hasher = newDefaultHasher()
 	}
 
+	// 初始化结构
 	cache := &BigCache{
 		shards:       make([]*cacheShard, config.Shards),
 		lifeWindow:   uint64(config.LifeWindow.Seconds()),
@@ -67,6 +85,7 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		close:        make(chan struct{}),
 	}
 
+	// remove meta、remove、reson
 	var onRemove func(wrappedEntry []byte, reason RemoveReason)
 	if config.OnRemoveWithMetadata != nil {
 		onRemove = cache.providedOnRemoveWithMetadata
@@ -78,19 +97,25 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		onRemove = cache.notProvidedOnRemove
 	}
 
+	// 初始化分片
 	for i := 0; i < config.Shards; i++ {
 		cache.shards[i] = initNewShard(config, onRemove, clock)
 	}
 
+	// 初始化清理协程
 	if config.CleanWindow > 0 {
 		go func() {
+		    // 创建定期时钟
 			ticker := time.NewTicker(config.CleanWindow)
 			defer ticker.Stop()
+
 			for {
 				select {
 				case t := <-ticker.C:
+				    // 定期清理
 					cache.cleanUp(uint64(t.Unix()))
 				case <-cache.close:
+				    // 收到退出通知
 					return
 				}
 			}
@@ -103,6 +128,7 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 // Close is used to signal a shutdown of the cache when you are done with it.
 // This allows the cleaning goroutines to exit and ensures references are not
 // kept to the cache preventing GC of the entire cache.
+// 关闭
 func (c *BigCache) Close() error {
 	close(c.close)
 	return nil
@@ -111,7 +137,9 @@ func (c *BigCache) Close() error {
 // Get reads entry for the key.
 // It returns an ErrEntryNotFound when
 // no entry exists for the given key.
+// 取值
 func (c *BigCache) Get(key string) ([]byte, error) {
+    // 计算hash、定位到分片，获取值
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
 	return shard.get(key, hashedKey)
@@ -120,6 +148,7 @@ func (c *BigCache) Get(key string) ([]byte, error) {
 // GetWithInfo reads entry for the key with Response info.
 // It returns an ErrEntryNotFound when
 // no entry exists for the given key.
+// 同get
 func (c *BigCache) GetWithInfo(key string) ([]byte, Response, error) {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -127,6 +156,7 @@ func (c *BigCache) GetWithInfo(key string) ([]byte, Response, error) {
 }
 
 // Set saves entry under the key
+// 同get
 func (c *BigCache) Set(key string, entry []byte) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -136,6 +166,7 @@ func (c *BigCache) Set(key string, entry []byte) error {
 // Append appends entry under the key if key exists, otherwise
 // it will set the key (same behaviour as Set()). With Append() you can
 // concatenate multiple entries under the same key in an lock optimized way.
+// 同get
 func (c *BigCache) Append(key string, entry []byte) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -143,6 +174,7 @@ func (c *BigCache) Append(key string, entry []byte) error {
 }
 
 // Delete removes the key
+// 同get
 func (c *BigCache) Delete(key string) error {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -150,6 +182,7 @@ func (c *BigCache) Delete(key string) error {
 }
 
 // Reset empties all cache shards
+// 重置所有分片
 func (c *BigCache) Reset() error {
 	for _, shard := range c.shards {
 		shard.reset(c.config)
@@ -158,6 +191,7 @@ func (c *BigCache) Reset() error {
 }
 
 // Len computes number of entries in cache
+// 计算总大小
 func (c *BigCache) Len() int {
 	var len int
 	for _, shard := range c.shards {
@@ -167,6 +201,7 @@ func (c *BigCache) Len() int {
 }
 
 // Capacity returns amount of bytes store in the cache.
+// 计算总容量
 func (c *BigCache) Capacity() int {
 	var len int
 	for _, shard := range c.shards {
@@ -176,6 +211,7 @@ func (c *BigCache) Capacity() int {
 }
 
 // Stats returns cache's statistics
+// 收集统计信息
 func (c *BigCache) Stats() Stats {
 	var s Stats
 	for _, shard := range c.shards {
@@ -190,6 +226,7 @@ func (c *BigCache) Stats() Stats {
 }
 
 // KeyMetadata returns number of times a cached resource was requested.
+// 获取key 的元信息
 func (c *BigCache) KeyMetadata(key string) Metadata {
 	hashedKey := c.hash.Sum64(key)
 	shard := c.getShard(hashedKey)
@@ -197,10 +234,12 @@ func (c *BigCache) KeyMetadata(key string) Metadata {
 }
 
 // Iterator returns iterator function to iterate over EntryInfo's from whole cache.
+// 迭代器
 func (c *BigCache) Iterator() *EntryInfoIterator {
 	return newIterator(c)
 }
 
+// 触发删除自己，如果删除返回true
 func (c *BigCache) onEvict(oldestEntry []byte, currentTimestamp uint64, evict func(reason RemoveReason) error) bool {
 	oldestTimestamp := readTimestampFromEntry(oldestEntry)
 	if currentTimestamp-oldestTimestamp > c.lifeWindow {
@@ -210,12 +249,14 @@ func (c *BigCache) onEvict(oldestEntry []byte, currentTimestamp uint64, evict fu
 	return false
 }
 
+// 清理函数
 func (c *BigCache) cleanUp(currentTimestamp uint64) {
 	for _, shard := range c.shards {
 		shard.cleanUp(currentTimestamp)
 	}
 }
 
+// 获取分片
 func (c *BigCache) getShard(hashedKey uint64) (shard *cacheShard) {
 	return c.shards[hashedKey&c.shardMask]
 }
@@ -224,17 +265,23 @@ func (c *BigCache) providedOnRemove(wrappedEntry []byte, reason RemoveReason) {
 	c.config.OnRemove(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry))
 }
 
+// 回调key、value和原因
 func (c *BigCache) providedOnRemoveWithReason(wrappedEntry []byte, reason RemoveReason) {
 	if c.config.onRemoveFilter == 0 || (1<<uint(reason))&c.config.onRemoveFilter > 0 {
 		c.config.OnRemoveWithReason(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry), reason)
 	}
 }
 
+// 空函数
 func (c *BigCache) notProvidedOnRemove(wrappedEntry []byte, reason RemoveReason) {
 }
 
 func (c *BigCache) providedOnRemoveWithMetadata(wrappedEntry []byte, reason RemoveReason) {
+    // 获取key hash
 	hashedKey := c.hash.Sum64(readKeyFromEntry(wrappedEntry))
+	// 获取分片
 	shard := c.getShard(hashedKey)
+
+    // 回调key、value、元信息
 	c.config.OnRemoveWithMetadata(readKeyFromEntry(wrappedEntry), readEntry(wrappedEntry), shard.getKeyMetadata(hashedKey))
 }

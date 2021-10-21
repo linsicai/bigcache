@@ -3,54 +3,74 @@ package bigcache
 import "time"
 
 // Config for BigCache
+// 配置
 type Config struct {
 	// Number of cache shards, value must be a power of two
+	// 分片数，必须是2 的n 次方
 	Shards int
 	// Time after which entry can be evicted
+	// 超时时间？
 	LifeWindow time.Duration
 	// Interval between removing expired entries (clean up).
 	// If set to <= 0 then no action is performed. Setting to < 1 second is counterproductive — bigcache has a one second resolution.
+	// 清理间隔？
 	CleanWindow time.Duration
 	// Max number of entries in life window. Used only to calculate initial size for cache shards.
 	// When proper value is set then additional memory allocation does not occur.
+	// 最多清理项？
 	MaxEntriesInWindow int
 	// Max size of entry in bytes. Used only to calculate initial size for cache shards.
+	// 最大实体数
 	MaxEntrySize int
 	// StatsEnabled if true calculate the number of times a cached resource was requested.
+	// 是否开启统计
 	StatsEnabled bool
 	// Verbose mode prints information about new memory allocation
+	// 打印详情
 	Verbose bool
 	// Hasher used to map between string keys and unsigned 64bit integers, by default fnv64 hashing is used.
+	// hash 函数
 	Hasher Hasher
 	// HardMaxCacheSize is a limit for cache size in MB. Cache will not allocate more memory than this limit.
 	// It can protect application from consuming all available memory on machine, therefore from running OOM Killer.
 	// Default value is 0 which means unlimited size. When the limit is higher than 0 and reached then
 	// the oldest entries are overridden for the new ones.
+	// 最大内存大小
 	HardMaxCacheSize int
 	// OnRemove is a callback fired when the oldest entry is removed because of its expiration time or no space left
 	// for the new entry, or because delete was called.
 	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
 	// ignored if OnRemoveWithMetadata is specified.
+	// 清理回调函数
 	OnRemove func(key string, entry []byte)
 	// OnRemoveWithMetadata is a callback fired when the oldest entry is removed because of its expiration time or no space left
 	// for the new entry, or because delete was called. A structure representing details about that specific entry.
 	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
+	// 清理回调函数2
 	OnRemoveWithMetadata func(key string, entry []byte, keyMetadata Metadata)
 	// OnRemoveWithReason is a callback fired when the oldest entry is removed because of its expiration time or no space left
 	// for the new entry, or because delete was called. A constant representing the reason will be passed through.
 	// Default value is nil which means no callback and it prevents from unwrapping the oldest entry.
 	// Ignored if OnRemove is specified.
+	// 清理回调函数3
 	OnRemoveWithReason func(key string, entry []byte, reason RemoveReason)
 
+	// 关注的清理原因位
 	onRemoveFilter int
 
 	// Logger is a logging interface and used in combination with `Verbose`
 	// Defaults to `DefaultLogger()`
+	// 日志
 	Logger Logger
 }
 
 // DefaultConfig initializes config with default values.
 // When load for BigCache can be predicted in advance then it is better to use custom config.
+// 默认1024 个分片
+// 最大600k 实体
+// 每秒清理一次
+// 关闭统计
+// 打印详情
 func DefaultConfig(eviction time.Duration) Config {
 	return Config{
 		Shards:             1024,
@@ -67,11 +87,13 @@ func DefaultConfig(eviction time.Duration) Config {
 }
 
 // initialShardSize computes initial shard size
+// 计算每分片大小
 func (c Config) initialShardSize() int {
 	return max(c.MaxEntriesInWindow/c.Shards, minimumEntriesInShard)
 }
 
 // maximumShardSizeInBytes computes maximum shard size in bytes
+// 每分片最大大小
 func (c Config) maximumShardSizeInBytes() int {
 	maxShardSize := 0
 
